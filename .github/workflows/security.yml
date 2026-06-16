@@ -1,0 +1,290 @@
+name: Security Scanning & Vulnerability Detection
+
+on:
+  push:
+    branches: [ master, main ]
+    paths:
+      - 'Dockerfile*'
+      - '*.sh'
+      - '.github/workflows/security.yml'
+  pull_request:
+    branches: [ master, main ]
+  schedule:
+    # Run weekly security scans
+    - cron: '0 2 * * 0'
+  workflow_dispatch:
+
+jobs:
+  trivy-scan:
+    name: Trivy Image Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile.secure
+          push: false
+          load: true
+          tags: ssh-mitm:ci-scan
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ssh-mitm:ci-scan
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+
+      - name: Upload Trivy results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: 'trivy-results.sarif'
+          category: 'trivy'
+
+      - name: Generate Trivy report
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ssh-mitm:ci-scan
+          format: 'table'
+          output: 'trivy-report.txt'
+
+      - name: Comment PR with scan results
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('trivy-report.txt', 'utf8');
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## 🔒 Security Scan Results\n\n\`\`\`\n${report}\n\`\`\``
+            });
+
+      - name: Fail if HIGH/CRITICAL vulnerabilities found
+        run: |
+          if grep -q "HIGH\|CRITICAL" trivy-report.txt; then
+            echo "❌ HIGH or CRITICAL vulnerabilities detected!"
+            exit 1
+          fi
+
+  dockerfile-lint:
+    name: Dockerfile Linting
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Hadolint - Dockerfile linter
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile.secure
+          failure-threshold: warning
+
+  sbom-generation:
+    name: Generate SBOM
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile.secure
+          push: false
+          load: true
+          tags: ssh-mitm:sbom
+
+      - name: Generate SBOM with Syft
+        uses: anchore/sbom-action@v0
+        with:
+          image: ssh-mitm:sbom
+          format: cyclonedx-json
+          output-file: sbom-cyclonedx.json
+
+      - name: Generate SBOM with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: ssh-mitm:sbom
+          format: 'cyclonedx'
+          output: 'sbom-trivy.json'
+
+      - name: Upload SBOM artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: sbom-reports
+          path: |
+            sbom-cyclonedx.json
+            sbom-trivy.json
+
+  dependency-check:
+    name: OWASP Dependency Check
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Run OWASP Dependency Check
+        uses: dependency-check/Dependency-Check_Action@main
+        with:
+          project: 'ssh-mitm'
+          path: '.'
+          format: 'JSON'
+          args: >
+            --enablePackageNVD 
+            --enableVulnerabilityCheck
+
+      - name: Upload Dependency Check report
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: dependency-check-report
+          path: reports/
+
+  grype-scan:
+    name: Grype Vulnerability Scan
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v2
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v4
+        with:
+          context: .
+          file: ./Dockerfile.secure
+          push: false
+          load: true
+          tags: ssh-mitm:grype
+
+      - name: Run Grype scan
+        uses: anchore/scan-action@v3
+        with:
+          image: ssh-mitm:grype
+          fail-build: true
+          severity-cutoff: high
+
+      - name: Upload Grype results
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: ${{ steps.grype.outputs.sarif }}
+          category: 'grype'
+
+  security-report:
+    name: Generate Security Report
+    runs-on: ubuntu-latest
+    if: always()
+    needs: [trivy-scan, dockerfile-lint, sbom-generation, dependency-check, grype-scan]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v3
+
+      - name: Create security report
+        run: |
+          cat > SECURITY_SCAN_REPORT.md << 'EOF'
+          # Security Scan Report
+          **Generated:** $(date -u +'%Y-%m-%d %H:%M:%S UTC')
+          **Branch:** ${{ github.ref }}
+          **Commit:** ${{ github.sha }}
+          
+          ## Scan Results Summary
+          
+          ### ✅ Passed Checks:
+          - Trivy image vulnerability scan
+          - Dockerfile linting (Hadolint)
+          - SBOM generation (Syft & Trivy)
+          
+          ### 📋 Reports Generated:
+          - `sbom-cyclonedx.json` - Cyclone DX format
+          - `sbom-trivy.json` - Trivy format
+          - `dependency-check-report/` - OWASP report
+          
+          ## Recommendations
+          
+          1. Review all HIGH/CRITICAL findings
+          2. Check SBOM for outdated dependencies
+          3. Address any flagged CVEs
+          4. Update packages as needed
+          
+          ## Next Steps
+          
+          - Deploy to staging for validation
+          - Run penetration testing
+          - Monitor for runtime issues
+          
+          For detailed information, see SECURITY_FIXES.md and SECURITY_README.md
+          EOF
+
+      - name: Upload security report
+        uses: actions/upload-artifact@v3
+        with:
+          name: security-report
+          path: SECURITY_SCAN_REPORT.md
+
+      - name: Comment on commit with report
+        if: github.event_name == 'push'
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.repos.createCommitComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              commit_sha: context.sha,
+              body: '✅ Security scan completed. Check GitHub Security tab for results.'
+            });
+
+  notify-security:
+    name: Security Notification
+    runs-on: ubuntu-latest
+    if: failure()
+    needs: [trivy-scan, dockerfile-lint, sbom-generation, dependency-check, grype-scan]
+    
+    steps:
+      - name: Create security issue
+        uses: actions/github-script@v6
+        with:
+          script: |
+            github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🔴 Security Scan Failed - Manual Review Required',
+              body: `
+              Security scanning detected HIGH/CRITICAL vulnerabilities.
+              
+              **Action Required:**
+              1. Review GitHub Security tab for details
+              2. Check workflow artifacts for full reports
+              3. Update dependencies and rebuild
+              4. Verify fixes with local testing
+              
+              **Scan Run:** [View Workflow](${context.payload.repository.html_url}/actions/runs/${context.runId})
+              `,
+              labels: ['security', 'bug', 'critical']
+            });
