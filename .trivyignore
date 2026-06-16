@@ -1,0 +1,23 @@
+# Trivy Vulnerability Ignore File
+# This file documents known/acceptable vulnerabilities that are intentionally ignored
+# Format: vulnerability_id reason expires_date
+
+# OpenSSH 7.5p1 CVEs
+# These are documented and understood to be present in the MITM-patched version
+# Users should be aware of these when deploying
+CVE-2018-15473 Username enumeration in OpenSSH 7.5p1 - documented in SECURITY_ADVISORY.md 2027-01-01
+CVE-2019-6111 SCP file integrity bypass in OpenSSH 7.5p1 - documented in SECURITY_ADVISORY.md 2027-01-01
+CVE-2019-16905 DoS in OpenSSH 7.5p1 - documented in SECURITY_ADVISORY.md 2027-01-01
+CVE-2020-12062 Buffer overflow in OpenSSH 7.5p1 - documented in SECURITY_ADVISORY.md 2027-01-01
+CVE-2020-14145 Information disclosure in OpenSSH 7.5p1 - documented in SECURITY_ADVISORY.md 2027-01-01
+
+# Ubuntu 20.04 Base Image CVEs (if any)
+# Low-severity CVEs in base image that don't affect MITM functionality
+# Review and update quarterly
+
+# Instructions for updating this file:
+# 1. Run Trivy scan: trivy image ssh-mitm:latest
+# 2. For each acceptable CVE, add entry with justification
+# 3. Set expiration date for review
+# 4. Document reason in related security files
+# 5. Review expired entries quarterly
