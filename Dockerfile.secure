@@ -1,0 +1,58 @@
+FROM ubuntu:20.04 as builder
+
+# Set non-interactive mode for apt
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install openssh-client with specific version pinning
+RUN apt-get update -qq && \
+    apt-get install -y -q --no-install-recommends \
+    openssh-client=1:8.2p1-4ubuntu0.7 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Final stage
+FROM ubuntu:20.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Install only runtime dependencies with version pinning
+RUN apt-get update -qq && \
+    apt-get install -y -q --no-install-recommends \
+    libcrypto1.1=1.1.1f-1ubuntu2.21 && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
+
+# Copy ssh-keygen and its library dependency from builder
+COPY --from=builder /lib/x86_64-linux-gnu/libcrypto.so.1.1 /lib/x86_64-linux-gnu/libcrypto.so.1.1
+COPY --from=builder /usr/bin/ssh-keygen /usr/bin/ssh-keygen
+
+# Create non-interactive ssh-mitm user (security best practice)
+RUN useradd -m -s /usr/sbin/nologin ssh-mitm
+
+# Copy application files
+COPY openssh-7.5p1-mitm/sshd /home/ssh-mitm/bin/sshd_mitm
+COPY openssh-7.5p1-mitm/ssh /home/ssh-mitm/bin/ssh
+COPY openssh-7.5p1-mitm/ssh_config.mitm /home/ssh-mitm/etc/ssh_config
+COPY openssh-7.5p1-mitm/sshd_config /home/ssh-mitm/etc/sshd_config
+
+# Set correct ownership and permissions
+RUN chown -R ssh-mitm:ssh-mitm /home/ssh-mitm && \
+    chmod 750 /home/ssh-mitm && \
+    chmod 700 /home/ssh-mitm/etc/
+
+# Switch to non-root user
+USER ssh-mitm
+WORKDIR /home/ssh-mitm
+
+# Create directories with proper permissions
+RUN mkdir -m 0700 /home/ssh-mitm/empty /home/ssh-mitm/.ssh /home/ssh-mitm/tmp && \
+    mkdir -m 0700 /home/ssh-mitm/hostkeys
+
+EXPOSE 2222/tcp
+
+# Security Note: This generates new ED25519 & RSA host keys each time the container runs.
+# Consider implementing persistent host keys for production use.
+CMD /usr/bin/ssh-keygen -t rsa -b 4096 -f /home/ssh-mitm/hostkeys/ssh_host_rsa_key -N ''; \
+    /usr/bin/ssh-keygen -t ed25519 -f /home/ssh-mitm/hostkeys/ssh_host_ed25519_key -N ''; \
+    echo; \
+    /home/ssh-mitm/bin/sshd_mitm -D -f /home/ssh-mitm/etc/sshd_config
